@@ -14,7 +14,6 @@ class ImprovementOperator:
     def apply(self, state: KnowledgeState) -> Tuple[KnowledgeState, bool]:
         """
         Apply operator to state
-        
         Returns (new_state, was_modified)
         """
         raise NotImplementedError
@@ -23,7 +22,6 @@ class ImprovementOperator:
                          new_state: KnowledgeState) -> bool:
         """
         Verify that invariants are preserved after operation
-        
         Basic invariant: never lose claims without merging
         """
         if len(new_state.claims) < len(old_state.claims):
