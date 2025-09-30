@@ -2,8 +2,8 @@
 
 from typing import List, Dict
 from collections import defaultdict
-from .knowledge_state import KnowledgeState
-from .operators.base import ImprovementOperator
+from knowledge_state import KnowledgeState
+from operators import ImprovementOperator
 
 
 class IterativeRefinementEngine:
