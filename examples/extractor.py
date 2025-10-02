@@ -17,7 +17,7 @@ class LLMExtractor:
         )
         
     def extract_claims(self, paper_text: str) -> KnowledgeState:
-        """Extract claims from paper text into structured format."""
+        """Extract claims from paper text into structured format"""
         
         prompt = f"""Extract the key claims from this research paper text. For each claim, provide:
 1. A clear statement of the claim

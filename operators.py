@@ -1,5 +1,8 @@
 """Improvement operators for knowledge states"""
 
+import json
+import os
+import anthropic
 from typing import Tuple, Set
 from knowledge_state import KnowledgeState, Claim
 
@@ -155,6 +158,196 @@ class RemoveWeakClaimsOperator(ImprovementOperator):
             if 'weak_removals' not in new_state.metadata:
                 new_state.metadata['weak_removals'] = []
             new_state.metadata['weak_removals'].extend(removed_claims)
+        
+        self.applications += 1
+        return new_state, modified
+
+
+class LLMMergeDuplicateClaimsOperator(ImprovementOperator):
+    """Use LLM to identify and merge semantically duplicate claims"""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        super().__init__("llm_merge_duplicates")
+        self.client = anthropic.Anthropic(
+            api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")
+        )
+        
+    def apply(self, state: KnowledgeState) -> Tuple[KnowledgeState, bool]:
+        if len(state.claims) < 2:
+            return state, False
+        
+        claims_list = [
+            {'id': cid, 'text': c.text, 'evidence': c.evidence}
+            for cid, c in state.claims.items()
+        ]
+        
+        prompt = f"""Analyze these claims and identify semantic duplicates.
+
+Claims:
+{json.dumps(claims_list, indent=2)}
+
+Return JSON:
+{{
+    "merges": [
+        {{
+            "keep": "c1",
+            "remove": ["c2"],
+            "reason": "explanation"
+        }}
+    ]
+}}
+
+If no merges needed: {{"merges": []}}
+Return ONLY the JSON."""
+
+        message = self.client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        response_text = message.content[0].text
+        
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+            
+        try:
+            merge_data = json.loads(response_text)
+        except json.JSONDecodeError:
+            return state, False
+        
+        if not merge_data.get('merges'):
+            return state, False
+        
+        new_state = KnowledgeState(
+            claims=state.claims.copy(),
+            relationships=state.relationships.copy(),
+            metadata=state.metadata.copy()
+        )
+        
+        modified = False
+        claims_to_remove = set()
+        
+        for merge in merge_data['merges']:
+            keep_id = merge['keep']
+            remove_ids = merge['remove']
+            
+            if keep_id not in new_state.claims:
+                continue
+            
+            kept_claim = new_state.claims[keep_id]
+            evidence_set = set(kept_claim.evidence)
+            
+            for remove_id in remove_ids:
+                if remove_id in new_state.claims:
+                    removed_claim = new_state.claims[remove_id]
+                    evidence_set.update(removed_claim.evidence)
+                    claims_to_remove.add(remove_id)
+                    modified = True
+            
+            if modified:
+                kept_claim.evidence = list(evidence_set)
+                
+                if 'merges' not in new_state.metadata:
+                    new_state.metadata['merges'] = []
+                new_state.metadata['merges'].append({
+                    'kept': keep_id,
+                    'removed': list(remove_ids),
+                    'reason': merge.get('reason', 'semantic similarity')
+                })
+        
+        for claim_id in claims_to_remove:
+            del new_state.claims[claim_id]
+        
+        self.applications += 1
+        return new_state, modified
+
+
+class LLMExtractImplicitAssumptionsOperator(ImprovementOperator):
+    """Use LLM to identify and extract implicit assumptions"""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        super().__init__("llm_extract_assumptions")
+        self.client = anthropic.Anthropic(
+            api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")
+        )
+        
+    def apply(self, state: KnowledgeState) -> Tuple[KnowledgeState, bool]:
+        if not state.claims:
+            return state, False
+        
+        sample_size = min(3, len(state.claims))
+        sample_claims = list(state.claims.values())[:sample_size]
+        claims_text = "\n".join([f"- {c.text}" for c in sample_claims])
+        
+        prompt = f"""Identify implicit assumptions in these claims.
+
+Claims:
+{claims_text}
+
+Return JSON:
+{{
+    "assumptions": [
+        {{
+            "text": "assumption",
+            "related_claim_ids": ["c1"],
+            "confidence": 0.8
+        }}
+    ]
+}}
+
+If none found: {{"assumptions": []}}
+Return ONLY the JSON."""
+
+        message = self.client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        response_text = message.content[0].text
+        
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+            
+        try:
+            assumption_data = json.loads(response_text)
+        except json.JSONDecodeError:
+            return state, False
+        
+        if not assumption_data.get('assumptions'):
+            return state, False
+        
+        new_state = KnowledgeState(
+            claims=state.claims.copy(),
+            relationships=state.relationships.copy(),
+            metadata=state.metadata.copy()
+        )
+        
+        modified = False
+        next_id = len(new_state.claims) + 1
+        
+        for assumption in assumption_data['assumptions']:
+            new_claim = Claim(
+                id=f"a{next_id}",
+                text=f"[ASSUMPTION] {assumption['text']}",
+                evidence=["derived by LLM"],
+                section="assumptions",
+                confidence=assumption.get('confidence', 0.6)
+            )
+            new_state.claims[new_claim.id] = new_claim
+            next_id += 1
+            modified = True
+            
+            for related_id in assumption.get('related_claim_ids', []):
+                if related_id in new_state.relationships:
+                    new_state.relationships[related_id].append(new_claim.id)
+                else:
+                    new_state.relationships[related_id] = [new_claim.id]
         
         self.applications += 1
         return new_state, modified
